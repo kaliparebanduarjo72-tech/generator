@@ -8,40 +8,54 @@ from io import BytesIO
 import os
 import re
 
-# --- 1. KONFIGURASI API ---
+# --- 1. KONFIGURASI API (AUTO-DETEKSI MODEL) ---
 def init_api():
     try:
-        # Coba ambil dari secrets dulu, jika gagal ambil dari env
         api_key = st.secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
         
         if not api_key:
-            st.error("⚠️ API Key tidak ditemukan! Masukkan di Secrets Streamlit dengan nama GEMINI_API_KEY")
+            st.error("⚠️ API Key tidak ditemukan! Pastikan GEMINI_API_KEY sudah diset di Secrets Streamlit.")
             st.stop()
             
         genai.configure(api_key=api_key)
-        return genai.GenerativeModel('gemini-1.5-flash') # Gunakan model yang stabil
+        
+        # Mencari model yang aktif secara dinamis untuk menghindari error 404
+        model_list = [
+            m.name for m in genai.list_models() 
+            if 'generateContent' in m.supported_generation_methods
+        ]
+        
+        if not model_list:
+            st.error("Tidak ada model AI yang tersedia untuk akun ini.")
+            st.stop()
+        
+        # Memprioritaskan gemini-1.5-flash jika tersedia, jika tidak pakai yang pertama
+        selected = "models/gemini-1.5-flash" if "models/gemini-1.5-flash" in model_list else model_list[0]
+        return genai.GenerativeModel(selected)
     except Exception as e:
-        st.error(f"Kesalahan Konfigurasi: {e}")
+        st.error(f"Kesalahan Konfigurasi API: {e}")
         st.stop()
 
 model = init_api()
 
 # --- 2. FUNGSI EKSPOR ---
 def clean_markdown_for_export(text):
-    """Menghilangkan karakter tabel markdown agar rapi saat jadi teks biasa di dokumen"""
+    """Membersihkan sintaks markdown agar rapi di file dokumen biasa"""
+    # Mengubah tabel markdown menjadi teks yang lebih terbaca
     text = text.replace("|", "  ")
-    text = re.sub(r'[-]{3,}', '', text) # Hilangkan garis pembatas tabel ---
+    text = re.sub(r'[-]{3,}', '', text) 
+    # Menghilangkan tanda bintang tebal markdown
+    text = text.replace("**", "")
     return text
 
 def export_to_word(text, school_name):
     doc = Document()
-    # Header Sekolah
+    # Header
     h = doc.add_heading(school_name, 0)
     h.alignment = WD_ALIGN_PARAGRAPH.CENTER
     
-    # Bersihkan teks markdown agar tidak mentah di Word
+    # Isi
     cleaned_text = clean_markdown_for_export(text)
-    
     doc.add_paragraph(cleaned_text)
     
     buffer = BytesIO()
@@ -58,37 +72,36 @@ def export_to_pdf(text, school_name):
     
     pdf.set_font("Arial", size=10)
     cleaned_text = clean_markdown_for_export(text)
-    # Encode ke latin-1 dan abaikan karakter yang tidak didukung agar tidak crash
+    # Proteksi karakter encoding latin-1 agar tidak crash
     clean_text_final = cleaned_text.encode('latin-1', 'replace').decode('latin-1')
     pdf.multi_cell(0, 7, clean_text_final)
     
     return pdf.output(dest='S').encode('latin-1')
 
-# --- 3. UI STREAMLIT ---
+# --- 3. TAMPILAN UI ---
 st.set_page_config(page_title="GuruAI - SMPN 2 Kalipare", layout="wide")
 
-# CSS Khusus untuk mempercantik tabel di layar browser
 st.markdown("""
     <style>
     .header-box { background: linear-gradient(135deg, #1e3c72, #2a5298); color: white; padding: 25px; border-radius: 15px; text-align: center; }
     .main-card { background: white; padding: 25px; border-radius: 15px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); margin-top: 20px; color: black; }
     
-    /* Styling Tabel Markdown agar muncul di Streamlit */
+    /* CSS untuk memastikan Tabel Markdown muncul dengan garis kotak */
     div[data-testid="stMarkdownContainer"] table {
         width: 100%;
         border-collapse: collapse;
+        border: 2px solid #444;
         margin: 20px 0;
     }
     div[data-testid="stMarkdownContainer"] th {
         background-color: #f2f2f2;
-        color: black;
-        padding: 12px;
-        border: 1px solid #ddd;
+        padding: 10px;
+        border: 1px solid #444;
+        font-weight: bold;
     }
     div[data-testid="stMarkdownContainer"] td {
         padding: 10px;
-        border: 1px solid #ddd;
-        color: #333;
+        border: 1px solid #444;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -102,14 +115,13 @@ with col1:
     input_choice = st.radio("Sumber Materi:", ["Teks Manual", "Upload PDF"])
     materi_final = ""
     if input_choice == "Teks Manual":
-        materi_final = st.text_area("Masukkan Materi Pelajaran:", height=300, placeholder="Tempel materi di sini...")
+        materi_final = st.text_area("Masukkan Materi Pelajaran:", height=300, placeholder="Tempel teks materi di sini...")
     else:
         file_pdf = st.file_uploader("Upload PDF", type=["pdf"])
         if file_pdf:
             reader = PdfReader(file_pdf)
-            for page in reader.pages: 
-                materi_final += page.extract_text()
-            st.success("PDF berhasil dibaca!")
+            for page in reader.pages: materi_final += page.extract_text()
+            st.success("PDF Berhasil terbaca!")
     st.markdown('</div>', unsafe_allow_html=True)
 
 with col2:
@@ -124,34 +136,30 @@ with col2:
     
     if st.button("Generate Dokumen Rapi ✨", use_container_width=True):
         if materi_final:
-            with st.spinner("Menyusun kisi-kisi dan naskah soal..."):
+            with st.spinner("AI sedang menyusun Kisi-kisi, Kartu Soal, dan Naskah..."):
                 try:
                     str_bentuk = ", ".join(bentuk_soal)
                     prompt = (
-                        f"Materi: {materi_final[:5000]}. Mapel: {mapel}. Sekolah: SMP NEGERI 2 KALIPARE.\n\n"
-                        f"Tugas: Buatlah {jumlah} soal dengan variasi: {str_bentuk}.\n\n"
-                        f"STRUKTUR OUTPUT (WAJIB):\n"
-                        f"1. **KISI-KISI SOAL**: Buat tabel Markdown dengan kolom (No | Tujuan Pembelajaran | Materi | Indikator | Level | No Soal).\n"
-                        f"2. **KARTU SOAL**: Untuk setiap nomor, buat tabel Markdown yang berisi detail (Nomor | TP | Materi | Indikator | Level | Kunci | Soal).\n"
-                        f"3. **NASKAH SOAL**: Tuliskan naskah soal siap cetak.\n"
-                        f"4. **KUNCI JAWABAN**: Daftar kunci dan pembahasan.\n\n"
-                        f"Gunakan tanda '|' untuk membuat tabel. Pastikan baris pemisah tabel '---' tersedia."
+                        f"Materi: {materi_final[:6000]}. Mapel: {mapel}. Sekolah: SMP NEGERI 2 KALIPARE.\n\n"
+                        f"Tugas: Buatkan {jumlah} soal dengan variasi: {str_bentuk}.\n\n"
+                        f"FORMAT OUTPUT (WAJIB ADA): \n"
+                        f"1. KISI-KISI SOAL: (Buat Tabel Markdown dengan kolom No, Tujuan Pembelajaran, Materi, Indikator, Level, No Soal)\n"
+                        f"2. KARTU SOAL: (Untuk setiap soal, buat tabel Markdown yang berisi detail indikator dan rumusan soal)\n"
+                        f"3. NASKAH SOAL: (Daftar soal siap cetak)\n"
+                        f"4. KUNCI JAWABAN: (Daftar jawaban benar)\n\n"
+                        f"PENTING: Pastikan tabel menggunakan baris pemisah '|---|' agar tampil sebagai tabel di sistem."
                     )
                     
                     response = model.generate_content(prompt)
-                    hasil_ai = response.text
-                    
-                    # Simpan hasil di session state agar tidak hilang saat klik download
-                    st.session_state['hasil_ujian'] = hasil_ai
-                    
+                    st.session_state['hasil_ujian'] = response.text
                 except Exception as e:
-                    st.error(f"Gagal memanggil AI: {e}")
+                    st.error(f"Gagal memproses AI: {e}")
         else:
-            st.warning("Mohon isi materi terlebih dahulu!")
+            st.warning("Mohon masukkan materi terlebih dahulu!")
 
-# Tampilkan hasil jika ada
+# Tampilkan hasil jika data sudah ada di session
 if 'hasil_ujian' in st.session_state:
-    st.markdown("### 📋 Preview Perangkat Ujian")
+    st.markdown("### 📋 Preview Dokumen")
     st.markdown(st.session_state['hasil_ujian'])
     
     st.divider()
@@ -160,13 +168,13 @@ if 'hasil_ujian' in st.session_state:
         st.download_button(
             "📥 Simpan ke Word (.docx)", 
             data=export_to_word(st.session_state['hasil_ujian'], "SMP NEGERI 2 KALIPARE"), 
-            file_name=f"Perangkat_Soal_{mapel}.docx", 
+            file_name=f"Soal_{mapel}.docx", 
             use_container_width=True
         )
     with c2:
         st.download_button(
             "📥 Simpan ke PDF (.pdf)", 
             data=export_to_pdf(st.session_state['hasil_ujian'], "SMP NEGERI 2 KALIPARE"), 
-            file_name=f"Perangkat_Soal_{mapel}.pdf", 
+            file_name=f"Soal_{mapel}.pdf", 
             use_container_width=True
         )
