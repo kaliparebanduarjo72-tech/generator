@@ -4,7 +4,6 @@ from PyPDF2 import PdfReader
 from docx import Document
 from docx.shared import Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from fpdf import FPDF
 from io import BytesIO
 import os
 import re
@@ -14,7 +13,7 @@ def init_api():
     try:
         api_key = st.secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
         if not api_key:
-            st.error("⚠️ API Key tidak ditemukan!")
+            st.error("⚠️ API Key tidak ditemukan di Secrets!")
             st.stop()
         genai.configure(api_key=api_key)
         model_list = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
@@ -26,29 +25,7 @@ def init_api():
 
 model = init_api()
 
-# --- 2. FUNGSI EKSPOR KE WORD (DENGAN TABEL ASLI) ---
-def create_word_table(doc, markdown_table):
-    """Mengubah teks tabel markdown menjadi tabel asli di Word"""
-    lines = [line.strip() for line in markdown_table.strip().split('\n') if line.strip()]
-    if len(lines) < 2: return
-    
-    # Ambil baris data (abaikan baris pemisah |---|)
-    rows_data = []
-    for line in lines:
-        if re.match(r'^[|\s:-]+$', line): continue
-        cells = [c.strip() for c in line.split('|') if c.strip()]
-        if cells: rows_data.append(cells)
-    
-    if not rows_data: return
-
-    table = doc.add_table(rows=len(rows_data), cols=len(rows_data[0]))
-    table.style = 'Table Grid'
-    
-    for i, row in enumerate(rows_data):
-        for j, cell_text in enumerate(row):
-            if j < len(table.columns):
-                table.cell(i, j).text = cell_text
-
+# --- 2. FUNGSI EKSPOR KE WORD DENGAN LOGIKA TABEL ---
 def export_to_word(full_text, school_name):
     doc = Document()
     
@@ -56,19 +33,41 @@ def export_to_word(full_text, school_name):
     title = doc.add_heading(school_name, 0)
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     
-    # Memisahkan teks berdasarkan bagian tabel dan teks biasa
-    sections = re.split(r'(\n\|.*\|\n)', full_text)
-    
-    for section in sections:
-        if "|" in section and "---" not in section: # Deteksi baris tabel
-            # Jika bagian ini terlihat seperti tabel, kita kumpulkan barisnya
-            create_word_table(doc, section)
+    # Pecah teks berdasarkan baris
+    lines = full_text.split('\n')
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        
+        # Deteksi awal tabel Markdown
+        if line.startswith('|'):
+            table_data = []
+            while i < len(lines) and lines[i].strip().startswith('|'):
+                # Abaikan baris pemisah |---|
+                if not re.match(r'^[|\s:-]+$', lines[i].strip()):
+                    cells = [c.strip() for c in lines[i].split('|') if c.strip()]
+                    if cells:
+                        table_data.append(cells)
+                i += 1
+            
+            if table_data:
+                table = doc.add_table(rows=len(table_data), cols=len(table_data[0]))
+                table.style = 'Table Grid'
+                for r_idx, row_cells in enumerate(table_data):
+                    for c_idx, val in enumerate(row_cells):
+                        if c_idx < len(table.columns):
+                            table.cell(r_idx, c_idx).text = val
+            continue
+        
+        # Teks Biasa
+        if line:
+            clean_text = line.replace("**", "").replace("###", "")
+            p = doc.add_paragraph(clean_text)
+            if "KISI-KISI" in line or "KARTU SOAL" in line or "NASKAH" in line:
+                p.bold = True
         else:
-            # Teks biasa (bersihkan sisa markdown)
-            clean_text = section.replace("**", "").replace("###", "").strip()
-            if clean_text:
-                p = doc.add_paragraph(clean_text)
-                p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+            doc.add_paragraph("")
+        i += 1
 
     buffer = BytesIO()
     doc.save(buffer)
@@ -76,66 +75,66 @@ def export_to_word(full_text, school_name):
     return buffer
 
 # --- 3. UI STREAMLIT ---
-st.set_page_config(page_title="GuruAI - SMPN 2 Kalipare", layout="wide")
+st.set_page_config(page_title="GuruAI - HOTS Edition", layout="wide")
 
 st.markdown("""
     <style>
-    .header-box { background: linear-gradient(135deg, #1e3c72, #2a5298); color: white; padding: 20px; border-radius: 15px; text-align: center; }
+    .header-box { background: linear-gradient(135deg, #b22222, #8b0000); color: white; padding: 20px; border-radius: 15px; text-align: center; }
     .main-card { background: white; padding: 20px; border-radius: 15px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); margin-top: 20px; color: black; }
     div[data-testid="stMarkdownContainer"] table { width: 100%; border-collapse: collapse; border: 1px solid #444; }
-    div[data-testid="stMarkdownContainer"] th, td { padding: 8px; border: 1px solid #444; }
+    div[data-testid="stMarkdownContainer"] th, td { padding: 8px; border: 1px solid #444; font-size: 12px; }
     </style>
     """, unsafe_allow_html=True)
 
-st.markdown('<div class="header-box"><h1>SMP NEGERI 2 KALIPARE</h1><p>Penulisan Kisi-kisi & Kartu Soal Otomatis</p></div>', unsafe_allow_html=True)
+st.markdown('<div class="header-box"><h1>SMP NEGERI 2 KALIPARE</h1><p>Generator Soal HOTS & Perangkat Penilaian</p></div>', unsafe_allow_html=True)
 
 col1, col2 = st.columns([2, 1])
 
 with col1:
     st.markdown('<div class="main-card">', unsafe_allow_html=True)
-    input_choice = st.radio("Sumber:", ["Teks Manual", "Upload PDF"])
-    materi = ""
+    input_choice = st.radio("Sumber Materi:", ["Teks Manual", "Upload PDF"])
+    materi_teks = ""
     if input_choice == "Teks Manual":
-        materi = st.text_area("Materi:", height=250)
+        materi_teks = st.text_area("Tempel Materi Pelajaran:", height=300)
     else:
-        f = st.file_uploader("Upload PDF", type=["pdf"])
-        if f:
-            reader = PdfReader(f)
-            for page in reader.pages: materi += page.extract_text()
+        file_pdf = st.file_uploader("Unggah PDF", type=["pdf"])
+        if file_pdf:
+            reader = PdfReader(file_pdf)
+            for page in reader.pages: materi_teks += page.extract_text()
     st.markdown('</div>', unsafe_allow_html=True)
 
 with col2:
-    st.write("⚙️ **Pengaturan**")
+    st.write("⚙️ **Parameter Soal HOTS**")
     mapel = st.text_input("Mata Pelajaran", "Seni Rupa")
-    jumlah = st.slider("Jumlah Soal", 1, 20, 5)
+    jumlah = st.slider("Jumlah Soal", 1, 15, 5)
     
-    if st.button("Generate Perangkat Soal ✨", use_container_width=True):
-        if materi:
-            with st.spinner("Menyusun tabel dan naskah..."):
+    if st.button("Generate Perangkat HOTS ✨", use_container_width=True):
+        if materi_teks:
+            with st.spinner("AI sedang merancang soal HOTS dan Stimulus..."):
                 prompt = (
-                    f"Materi: {materi[:4000]}. Mapel: {mapel}. Sekolah: SMP NEGERI 2 KALIPARE.\n\n"
-                    f"Buatkan {jumlah} soal PG dan Benar/Salah.\n"
-                    f"STRUKTUR WAJIB:\n"
-                    f"1. KISI-KISI SOAL: (Gunakan Tabel Markdown: No | TP | Materi | Indikator | Level | No Soal)\n"
-                    f"2. KARTU SOAL: (Buat Tabel Markdown untuk TIAP soal. Baris WAJIB: Nomor, Indikator, Level, Bentuk, Kunci Jawaban, Rumusan Soal)\n"
-                    f"3. NASKAH SOAL: (Susun rapi. Opsi A, B, C, D WAJIB tersusun kebawah/baris baru)\n"
-                    f"4. KUNCI JAWABAN: (Daftar singkat)\n"
-                    f"\nPENTING: Opsi jawaban jangan menyamping. Contoh:\n"
-                    f"A. Opsi 1\nB. Opsi 2\n"
+                    f"Materi: {materi_teks[:4000]}. Mapel: {mapel}. Sekolah: SMP NEGERI 2 KALIPARE.\n\n"
+                    f"Buatkan {jumlah} soal dengan karakteristik HOTS (Analisis, Evaluasi, Kreasi).\n"
+                    f"Setiap soal wajib memiliki STIMULUS (teks berita, gambar, kasus, atau data) sebelum pertanyaan.\n\n"
+                    f"FORMAT OUTPUT (WAJIB):\n"
+                    f"1. **KISI-KISI SOAL**: Tabel Markdown (No | TP | Materi | Indikator HOTS | Level Kognitif (L2/L3) | No Soal)\n"
+                    f"2. **KARTU SOAL**: Tabel Markdown per soal. Wajib ada baris: Nomor, Indikator, Level, Kunci, dan Rumusan Soal.\n"
+                    f"3. **NASKAH SOAL**: Susunan rapi. Opsi jawaban (A, B, C, D) wajib BARIS BARU (kebawah).\n"
+                    f"4. **KUNCI JAWABAN & PEMBAHASAN**.\n\n"
+                    f"PENTING: Gunakan pembatas tabel '|' yang konsisten agar sistem bisa membaca tabel dengan sempurna."
                 )
                 response = model.generate_content(prompt)
-                st.session_state['hasil'] = response.text
+                st.session_state['hasil_hots'] = response.text
         else:
-            st.warning("Isi materi!")
+            st.warning("Masukkan materi terlebih dahulu!")
 
-if 'hasil' in st.session_state:
-    st.markdown("### Preview Hasil")
-    st.markdown(st.session_state['hasil'])
+if 'hasil_hots' in st.session_state:
+    st.markdown("### Preview Perangkat Penilaian")
+    st.markdown(st.session_state['hasil_hots'])
     
     st.divider()
     st.download_button(
-        "📥 Download Word (Tabel Asli)", 
-        data=export_to_word(st.session_state['hasil'], "SMP NEGERI 2 KALIPARE"), 
-        file_name=f"Soal_{mapel}.docx", 
+        "📥 Download Word (Tabel Kisi-kisi & Kartu Soal)", 
+        data=export_to_word(st.session_state['hasil_hots'], "SMP NEGERI 2 KALIPARE"), 
+        file_name=f"Perangkat_HOTS_{mapel}.docx", 
         use_container_width=True
     )
